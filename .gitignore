@@ -1,0 +1,15 @@
+# Variables de entorno y credenciales AWS
+.env
+*.pem
+*.key
+
+# Entornos virtuales y caché de Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Artefactos locales pesados
+*.tar.gz
+*.pkl
