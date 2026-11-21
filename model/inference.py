@@ -1,30 +1,35 @@
 import json
 import os
-import joblib
 import numpy as np
 
 
 def model_fn(model_dir):
-    """Carga el modelo entrenado y los metadatos desde el directorio de SageMaker."""
-    bundle_path = os.path.join(model_dir, "model_bundle.joblib")
-    return joblib.load(bundle_path)
+    """Carga el modelo entrenado y los metadatos desde JSON puro (compatible con cualquier NumPy)."""
+    bundle_path = os.path.join(model_dir, "model_bundle.json")
+    with open(bundle_path, "r", encoding="utf-8") as f:
+        bundle = json.load(f)
+
+    bundle["user_factors"] = np.array(bundle["user_factors"], dtype=float)
+    bundle["item_components"] = np.array(bundle["item_components"], dtype=float)
+    return bundle
 
 
-def input_fn(request_body, request_content_type):
+def input_fn(request_body, request_content_type="application/json"):
     """Procesa la petición JSON entrante."""
     if request_content_type == "application/json":
         data = json.loads(request_body)
+        top_n = data.get("top_n", data.get("top_k", 5))
         return {
             "user_id": str(data.get("user_id", "U001")),
-            "top_n": int(data.get("top_n", 5)),
+            "top_n": int(top_n),
         }
     raise ValueError(f"Content-Type no soportado: {request_content_type}")
 
 
 def predict_fn(input_data, model_bundle):
     """Calcula recomendaciones mediante factorización matricial TruncatedSVD."""
-    user_id = input_data["user_id"]
-    top_n = input_data["top_n"]
+    user_id = str(input_data.get("user_id", ""))
+    top_n = int(input_data.get("top_n", input_data.get("top_k", 5)))
 
     user_factors = model_bundle["user_factors"]
     item_components = model_bundle["item_components"]
@@ -41,7 +46,7 @@ def predict_fn(input_data, model_bundle):
 
         recommendations = []
         for idx in ranked_indices:
-            item_id = idx_to_item[idx]
+            item_id = idx_to_item.get(str(idx)) or idx_to_item.get(idx)
             product = catalog[item_id]
             recommendations.append({
                 "item_id": item_id,
@@ -71,7 +76,7 @@ def predict_fn(input_data, model_bundle):
     }
 
 
-def output_fn(prediction, response_content_type):
+def output_fn(prediction, response_content_type="application/json"):
     """Serializa la respuesta en formato JSON."""
     if response_content_type == "application/json":
         return json.dumps(prediction, ensure_ascii=False)

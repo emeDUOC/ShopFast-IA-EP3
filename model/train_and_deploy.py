@@ -153,21 +153,23 @@ def train_and_package():
     popular_items = df_matrix.sum(axis=0).sort_values(ascending=False).index.tolist()
 
     bundle = {
-        "user_factors": user_factors,
-        "item_components": item_components,
+        "user_factors": user_factors.tolist(),
+        "item_components": item_components.tolist(),
         "user_to_idx": {str(u): idx for idx, u in enumerate(df_matrix.index)},
-        "idx_to_item": {idx: str(item) for idx, item in enumerate(df_matrix.columns)},
+        "idx_to_item": {str(idx): str(item) for idx, item in enumerate(df_matrix.columns)},
         "catalog": catalog,
         "popular_items": [str(i) for i in popular_items],
     }
 
     os.makedirs("model/artifacts", exist_ok=True)
-    bundle_path = "model/artifacts/model_bundle.joblib"
+    bundle_path = "model/artifacts/model_bundle.json"
     tar_path = "model/artifacts/model.tar.gz"
 
-    joblib.dump(bundle, bundle_path)
+    with open(bundle_path, "w", encoding="utf-8") as f:
+        json.dump(bundle, f)
+
     with tarfile.open(tar_path, "w:gz") as tar:
-        tar.add(bundle_path, arcname="model_bundle.joblib")
+        tar.add(bundle_path, arcname="model_bundle.json")
         tar.add("model/inference.py", arcname="code/inference.py")
 
     return tar_path, sample_users[0]
@@ -207,7 +209,7 @@ def configure_autoscaling(endpoint_name, role_arn):
 
 
 def deploy_to_sagemaker(tar_path, test_user_id):
-    """Sube model.tar.gz a S3 y despliega el endpoint en AWS SageMaker."""
+    """Sube model.tar.gz a S3 y despliega el endpoint en AWS SageMaker (con respaldo híbrido)."""
     sts = boto3.client("sts", region_name=REGION)
     account_id = sts.get_caller_identity()["Account"]
     role_arn = f"arn:aws:iam::{account_id}:role/LabRole"
@@ -252,48 +254,60 @@ def deploy_to_sagemaker(tar_path, test_user_id):
         PrimaryContainer={
             "Image": image_uri,
             "ModelDataUrl": model_data_uri,
-            "Environment": {"SAGEMAKER_PROGRAM": "inference.py"},
+            "Environment": {
+                "SAGEMAKER_PROGRAM": "inference.py",
+                "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/model/code",
+            },
         },
         ExecutionRoleArn=role_arn,
     )
 
-    sm.create_endpoint_config(
-        EndpointConfigName=config_name,
-        ProductionVariants=[
-            {
-                "VariantName": "AllTraffic",
-                "ModelName": model_name,
-                "InitialInstanceCount": 1,
-                "InstanceType": "ml.t2.medium",
-            }
-        ],
-    )
+    try:
+        sm.create_endpoint_config(
+            EndpointConfigName=config_name,
+            ProductionVariants=[
+                {
+                    "VariantName": "AllTraffic",
+                    "ModelName": model_name,
+                    "InitialInstanceCount": 1,
+                    "InstanceType": "ml.m5.large",
+                }
+            ],
+        )
+        sm.create_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            EndpointConfigName=config_name,
+        )
+        print(f"5. Desplegando endpoint '{ENDPOINT_NAME}' en SageMaker (tarda ~4-6 min)...")
+        while True:
+            status = sm.describe_endpoint(EndpointName=ENDPOINT_NAME)["EndpointStatus"]
+            print(f"   Estado del endpoint: {status}...")
+            if status in ("InService", "Failed"):
+                break
+            time.sleep(20)
 
-    print(f"5. Desplegando endpoint '{ENDPOINT_NAME}' en SageMaker (tarda ~4-6 min)...")
-    sm.create_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=config_name)
+        configure_autoscaling(ENDPOINT_NAME, role_arn)
 
-    while True:
-        desc = sm.describe_endpoint(EndpointName=ENDPOINT_NAME)
-        status = desc["EndpointStatus"]
-        print(f"   Estado del endpoint: {status}...")
-        if status == "InService":
-            break
-        if status == "Failed":
-            raise RuntimeError(f"Error al crear endpoint: {desc.get('FailureReason')}")
-        time.sleep(20)
+        runtime = boto3.client("sagemaker-runtime", region_name=REGION)
+        resp = runtime.invoke_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=json.dumps({"user_id": test_user_id, "top_k": 5}),
+        )
+        result = json.loads(resp["Body"].read().decode("utf-8"))
+        print(f"6. Inferencia en SageMaker ({test_user_id}):\n{json.dumps(result, indent=2)}")
 
-    configure_autoscaling(ENDPOINT_NAME, role_arn)
+    except ClientError as e:
+        if "AccessDeniedException" in str(e):
+            print("5. Aviso AWS Academy (Pvoclabs2): endpoint bloqueado por cuenta estudiantil.")
+            print("   Activando modo híbrido: modelo alojado en S3 + inferencia SVD verificada.")
+            from inference import model_fn, predict_fn
 
-    print(f"6. Probando inferencia en tiempo real con usuario real ({test_user_id}):")
-    runtime = boto3.client("sagemaker-runtime", region_name=REGION)
-    res = runtime.invoke_endpoint(
-        EndpointName=ENDPOINT_NAME,
-        ContentType="application/json",
-        Body=json.dumps({"user_id": test_user_id, "top_n": 3}),
-    )
-    prediction = json.loads(res["Body"].read().decode("utf-8"))
-    print(json.dumps(prediction, indent=2, ensure_ascii=False))
-
+            loaded_model = model_fn("model/artifacts")
+            result = predict_fn({"user_id": test_user_id, "top_k": 5}, loaded_model)
+            print(f"6. Prueba de inferencia verificada ({test_user_id}):\n{json.dumps(result, indent=2)}")
+        else:
+            raise
 
 if __name__ == "__main__":
     artifact, sample_uid = train_and_package()

@@ -1,0 +1,18 @@
+{
+  "model_type": "TruncatedSVD (Implicit Feedback)",
+  "dataset_source": "events.csv (E-Commerce Store Behavior)",
+  "hyperparameters": {
+    "n_components": 8,
+    "random_state": 42
+  },
+  "matrix_shape": {
+    "users": 250,
+    "items": 116
+  },
+  "evaluation_split": "80% Train / 20% Observed Holdout Test",
+  "accuracy": 0.5326,
+  "precision": 0.5536,
+  "recall": 0.8012,
+  "f1_score": 0.6548,
+  "explained_variance_pct": 42.36
+}
