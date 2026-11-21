@@ -13,3 +13,4 @@ __pycache__/
 # Artefactos locales pesados
 *.tar.gz
 *.pkl
+model/data/events.csv
